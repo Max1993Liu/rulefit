@@ -40,7 +40,6 @@ class RuleCondition():
         self.support = support
         self.feature_name = feature_name
 
-
     def __repr__(self):
         return self.__str__()
 
@@ -66,6 +65,8 @@ class RuleCondition():
             res =  1 * (X[:,self.feature_index] <= self.threshold)
         elif self.operator == ">":
             res = 1 * (X[:,self.feature_index] > self.threshold)
+        elif self.operator == 'in':
+            res = 1 * np.array([i in self.threshold for i in X[:, self.feature_index]], dtype=X.dtype)
         return res
 
     def __eq__(self, other):
