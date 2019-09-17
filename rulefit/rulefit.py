@@ -20,8 +20,6 @@ from functools import reduce
 
 
 
-
-
 class RuleCondition():
     """Class for binary rule condition
 
@@ -33,11 +31,13 @@ class RuleCondition():
                  threshold,
                  operator,
                  support,
-                 feature_name = None):
+                 na_direction=None,
+                 feature_name=None):
         self.feature_index = feature_index
         self.threshold = threshold
         self.operator = operator
         self.support = support
+        self.na_direction = na_direction
         self.feature_name = feature_name
 
     def __repr__(self):
@@ -61,19 +61,32 @@ class RuleCondition():
         -------
         X_transformed: array-like matrix, shape=(n_samples, 1)
         """
+        # if na_direction is 'left', missing values would result in the left branch
+        # aka. it will get the same value as if it meets the criteria
         if self.operator == "<=":
-            res =  1 * (X[:,self.feature_index] <= self.threshold)
+            res = 1 * (X[:,self.feature_index] <= self.threshold)
         elif self.operator == ">":
             res = 1 * (X[:,self.feature_index] > self.threshold)
-        elif self.operator == 'in':
-            res = 1 * np.array([i in self.threshold for i in X[:, self.feature_index]], dtype=X.dtype)
+        elif self.operator == '==':
+            res = 1 * np.array([i in self.threshold for i in X[:, self.feature_index]])
+        elif self.operator == '!=':
+            res = 1 * np.array([i not in self.threshold for i in X[:, self.feature_index]])
+        else:
+            raise ValueError('{} is not a valid operator'.format(self.operator))
+
+        if self.na_direction is not None:
+            na_ind = np.isnan(X[:, self.feature_index])
+            res[na_ind] = int(self.na_direction == 'left')
         return res
 
     def __eq__(self, other):
         return self.__hash__() == other.__hash__()
 
     def __hash__(self):
-        return hash((self.feature_index, self.threshold, self.operator, self.feature_name))
+        return hash((self.feature_index, 
+                    tuple(self.threshold) if isinstance(self.threshold, list) else self.threshold, 
+                    self.operator, 
+                    self.feature_name))
 
 
 class FriedScale():
@@ -82,16 +95,16 @@ class FriedScale():
     Each variable is first Winsorized l->l*, then standardised as 0.4 x l* / std(l*)
     Warning: this class should not be used directly.
     """    
-    def __init__(self,trim_quantile=0.0):
-        self.trim_quantile=trim_quantile
-        self.scale_multipliers=None
-        self.winsor_lims=None
+    def __init__(self, trim_quantile=0.0):
+        self.trim_quantile = trim_quantile
+        self.scale_multipliers = None
+        self.winsor_lims = None
         
-    def train(self,X):
+    def train(self, X):
         # get winsor limits
-        self.winsor_lims=np.ones([2,X.shape[1]])*np.inf
-        self.winsor_lims[0,:]=-np.inf
-        if self.trim_quantile>0:
+        self.winsor_lims = np.ones([2,X.shape[1]])*np.inf
+        self.winsor_lims[0,:] = -np.inf
+        if self.trim_quantile > 0:
             for i_col in np.arange(X.shape[1]):
                 lower=np.percentile(X[:,i_col],self.trim_quantile*100)
                 upper=np.percentile(X[:,i_col],100-self.trim_quantile*100)
@@ -122,12 +135,12 @@ class Rule():
 
     Warning: this class should not be used directly.
     """
-    def __init__(self,
-                 rule_conditions,prediction_value):
+    def __init__(self, rule_conditions):
         self.conditions = set(rule_conditions)
         self.support = min([x.support for x in rule_conditions])
-        self.prediction_value=prediction_value
-        self.rule_direction=None
+        # self.prediction_value=prediction_value
+        # self.rule_direction=None
+
     def transform(self, X):
         """Transform dataset.
 
@@ -140,7 +153,7 @@ class Rule():
         X_transformed: array-like matrix, shape=(n_samples, 1)
         """
         rule_applies = [condition.transform(X) for condition in self.conditions]
-        return reduce(lambda x,y: x * y, rule_applies)
+        return reduce(lambda x, y: x * y, rule_applies)
 
     def __str__(self):
         return  " & ".join([x.__str__() for x in self.conditions])
@@ -149,15 +162,32 @@ class Rule():
         return self.__str__()
 
     def __hash__(self):
+        # TODO: sum of hash values looks kinda sketchy
         return sum([condition.__hash__() for condition in self.conditions])
 
     def __eq__(self, other):
         return self.__hash__() == other.__hash__()
 
 
-def extract_rules_from_tree(tree, feature_names=None):
-    """Helper to turn a tree into as set of rules
-    """
+
+
+_OPERATORS = {
+    '<=': '>',
+    '>': '<=',
+    '!=': '==',
+    '==': '!='
+}
+
+def get_opposite_operator(op):
+    return _OPERATORS[op]
+
+
+
+def extract_rules_from_scikit_tree(tree, feature_names=None):
+    """ Extract a scikit-learn DecisionTree object into a set of Rule"""
+    if hasattr(tree, 'tree_'):
+        tree = tree.tree_
+
     rules = set()
 
     def traverse_nodes(node_id=0,
@@ -173,11 +203,12 @@ def extract_rules_from_tree(tree, feature_names=None):
             rule_condition = RuleCondition(feature_index=feature,
                                            threshold=threshold,
                                            operator=operator,
-                                           support = tree.n_node_samples[node_id] / float(tree.n_node_samples[0]),
+                                           support=tree.n_node_samples[node_id] / float(tree.n_node_samples[0]),
                                            feature_name=feature_name)
             new_conditions = conditions + [rule_condition]
         else:
             new_conditions = []
+
         ## if not terminal node
         if tree.children_left[node_id] != tree.children_right[node_id]: 
             feature = tree.feature[node_id]
@@ -190,16 +221,88 @@ def extract_rules_from_tree(tree, feature_names=None):
             traverse_nodes(right_node_id, ">", threshold, feature, new_conditions)
         else: # a leaf node
             if len(new_conditions)>0:
-                new_rule = Rule(new_conditions,tree.value[node_id][0][0])
+                new_rule = Rule(new_conditions)
                 rules.update([new_rule])
             else:
                 pass #tree only has a root node!
             return None
 
     traverse_nodes()
-    
     return rules
 
+
+
+def extract_rules_from_lgbm_tree(tree: dict, feature_names=None):
+    """ Extract a set of Rule from a tree from a lightgbm booster
+        the tree is one of the tree object from booster.dump_model()['tree_info']
+    """
+    if 'tree_structure' in tree:
+        tree = tree['tree_structure']
+
+    rules = set()
+    n_total_sample = tree['internal_count']
+    
+    def traverse_nodes(tree,
+                       operator=None,
+                       threshold=None,
+                       feature=None,
+                       n_sample=None,
+                       na_direction='left',
+                       conditions=[]):
+        if tree.get('split_index', None) == 0:
+            new_conditions = []
+        else:
+            if feature_names is not None:
+                feature_name = feature_names[feature]
+            else:
+                feature_name = feature
+                
+            rule_condition = RuleCondition(feature_index=feature,
+                                           threshold=threshold,
+                                           operator=operator,
+                                           support=n_sample / n_total_sample,
+                                           na_direction=na_direction,
+                                           feature_name=feature_name)
+            new_conditions = conditions + [rule_condition]
+        
+        ## if not terminal node
+        if 'leaf_index' not in tree: 
+            feature = tree['split_feature']
+            threshold = tree['threshold']
+            operator = tree['decision_type']
+            if operator == '==':
+                threshold = [float(i.strip()) for i in threshold.split('||')]
+            else:
+                threshold = float(threshold)
+            n_sample = tree['internal_count']
+            na_direction = 'left' if tree['default_left'] else 'right'
+            
+            traverse_nodes(tree=tree['left_child'], 
+                           operator=operator,
+                           threshold=threshold,
+                           feature=feature,
+                           n_sample=n_sample,
+                           na_direction=na_direction,
+                           conditions=new_conditions)
+            
+            traverse_nodes(tree=tree['right_child'], 
+                           operator=get_opposite_operator(operator),
+                           threshold=threshold,
+                           feature=feature,
+                           n_sample=n_sample,
+                           na_direction=na_direction,
+                           conditions=new_conditions)
+            
+        else: # a leaf node
+            if len(new_conditions) > 0:
+                new_rule = Rule(new_conditions)
+                rules.update([new_rule])
+            else:
+                pass #tree only has a root node!
+            return None
+
+    traverse_nodes(tree)
+    return rules
 
 
 class RuleEnsemble():
@@ -210,8 +313,7 @@ class RuleEnsemble():
 
     Parameters
     ----------
-    tree_list: List or array of DecisionTreeClassifier or DecisionTreeRegressor
-        Trees from which the rules are created
+    model: List of DecisionTree, a random forest or a booster
 
     feature_names: List of strings, optional (default=None)
         Names of the features
@@ -222,30 +324,47 @@ class RuleEnsemble():
         The ensemble of rules extracted from the trees
     """
     def __init__(self,
-                 tree_list,
+                 model,
+                 model_type='lightgbm',
                  feature_names=None):
-        self.tree_list = tree_list
+        if model_type not in ('tree', 'forest', 'lightgbm'):
+            raise ValueError('Only supported model types are: {}'.format(['tree', 'forest', 'lightgbm']))
+
+        self.model = model
+        self.model_type = model_type
         self.feature_names = feature_names
         self.rules = set()
         ## TODO: Move this out of __init__
         self._extract_rules()
-        self.rules=list(self.rules)
+        self.rules= list(self.rules)
 
     def _extract_rules(self):
-        """Recursively extract rules from each tree in the ensemble
-
-        """
-        for tree in self.tree_list:
-            rules = extract_rules_from_tree(tree[0].tree_,feature_names=self.feature_names)
-            self.rules.update(rules)
+        """ Recursively extract rules from the model """
+        if self.model_type == 'tree':
+            # a list of decision tree
+            for tree in self.model:
+                rules = extract_rules_from_scikit_tree(tree, feature_names=self.feature_names)
+                self.rules.update(rules)
+        
+        elif self.model_type == 'forest':
+            for tree in self.model.estimators_:
+                rules = extract_rules_from_scikit_tree(tree, feature_names=self.feature_names)
+                self.rules.update(rules)
+        
+        elif self.model_type == 'lightgbm':
+            if hasattr(self.model, 'booster_'):
+                model = self.model.booster_
+                for tree in model.dump_model()['tree_info']:
+                    rules = extract_rules_from_lgbm_tree(tree, feature_names=self.feature_names)
+                    self.rules.update(rules)
 
     def filter_rules(self, func):
-        self.rules = filter(lambda x: func(x), self.rules)
+        self.rules = list(filter(lambda x: func(x), self.rules))
 
     def filter_short_rules(self, k):
         self.filter_rules(lambda x: len(x.conditions) > k)
 
-    def transform(self, X,coefs=None):
+    def transform(self, X, coefs=None):
         """Transform dataset.
 
         Parameters
@@ -259,17 +378,18 @@ class RuleEnsemble():
         X_transformed: array-like matrix, shape=(n_samples, n_out)
             Transformed dataset. Each column represents one rule.
         """
-        rule_list=list(self.rules) 
-        if   coefs is None :
+        rule_list = self.rules 
+        if coefs is None :
             return np.array([rule.transform(X) for rule in rule_list]).T
         else: # else use the coefs to filter the rules we bother to interpret
-            res= np.array([rule_list[i_rule].transform(X) for i_rule in np.arange(len(rule_list)) if coefs[i_rule]!=0]).T
+            res= np.array([rule_list[i_rule].transform(X) \
+                        for i_rule in np.arange(len(rule_list)) if coefs[i_rule]!=0]).T
             res_=np.zeros([X.shape[0],len(rule_list)])
             res_[:,coefs!=0]=res
             return res_
+
     def __str__(self):
         return (map(lambda x: x.__str__(), self.rules)).__str__()
-
 
 
 
@@ -310,7 +430,7 @@ class RuleFit(BaseEstimator, TransformerMixin):
         The names of the features (columns)
 
     """
-    def __init__(self,tree_size=4,sample_fract='default',max_rules=2000,
+    def __init__(self,tree_size=4,sample_fract='default', max_rules=2000,
                  memory_par=0.01,
                  tree_generator=None,
                 rfmode='regress',lin_trim_quantile=0.025,
@@ -350,9 +470,9 @@ class RuleFit(BaseEstimator, TransformerMixin):
                 if   self.rfmode=='regress':
                     self.tree_generator = GradientBoostingRegressor(n_estimators=n_estimators_default, max_leaf_nodes=self.tree_size, learning_rate=self.memory_par,subsample=self.sample_fract_,random_state=self.random_state,max_depth=100)
                 else:
-                    self.tree_generator =GradientBoostingClassifier(n_estimators=n_estimators_default, max_leaf_nodes=self.tree_size, learning_rate=self.memory_par,subsample=self.sample_fract_,random_state=self.random_state,max_depth=100)
+                    self.tree_generator = GradientBoostingClassifier(n_estimators=n_estimators_default, max_leaf_nodes=self.tree_size, learning_rate=self.memory_par,subsample=self.sample_fract_,random_state=self.random_state,max_depth=100)
     
-            if   self.rfmode=='regress':
+            if self.rfmode=='regress':
                 if type(self.tree_generator) not in [GradientBoostingRegressor,RandomForestRegressor]:
                     raise ValueError("RuleFit only works with RandomForest and BoostingRegressor")
             else:
@@ -394,7 +514,7 @@ class RuleFit(BaseEstimator, TransformerMixin):
             X_rules = self.rule_ensemble.transform(X)
         
         ## standardise linear variables if requested (for regression model only)
-        if 'l' in self.model_type: 
+        if 'l' in self.model_type:
             if self.lin_standardise:
                 self.friedscale.train(X)
                 X_regn=self.friedscale.scale(X)
@@ -430,9 +550,6 @@ class RuleFit(BaseEstimator, TransformerMixin):
             self.lscv.fit(X_concat, y)
             self.coef_=self.lscv.coef_[0]
             self.intercept_=self.lscv.intercept_[0]
-        
-        
-        
         return self
 
     def predict(self, X):
