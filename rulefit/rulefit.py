@@ -12,10 +12,10 @@ The module structure is the following:
 """
 import pandas as pd
 import numpy as np
-from sklearn.base import BaseEstimator
-from sklearn.base import TransformerMixin
+import warnings
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.ensemble import GradientBoostingRegressor, GradientBoostingClassifier, RandomForestRegressor, RandomForestClassifier
-from sklearn.linear_model import LassoCV,LogisticRegressionCV
+from sklearn.linear_model import LassoCV, LogisticRegressionCV
 from functools import reduce
 
 
@@ -326,8 +326,8 @@ class RuleEnsemble():
                  model,
                  model_type='lightgbm',
                  feature_names=None):
-        if model_type not in ('tree', 'forest', 'lightgbm'):
-            raise ValueError('Only supported model types are: {}'.format(['tree', 'forest', 'lightgbm']))
+        if model_type not in ('tree', 'forest', 'gbdt', 'lightgbm'):
+            raise ValueError('Only supported model types are: {}'.format(['tree', 'forest', 'gbdt', 'lightgbm']))
 
         self.model = model
         self.model_type = model_type
@@ -345,7 +345,7 @@ class RuleEnsemble():
                 rules = extract_rules_from_scikit_tree(tree, feature_names=self.feature_names)
                 self.rules.update(rules)
         
-        elif self.model_type == 'forest':
+        elif self.model_type in ('forest', 'gbdt'):
             for tree in self.model.estimators_:
                 rules = extract_rules_from_scikit_tree(tree, feature_names=self.feature_names)
                 self.rules.update(rules)
@@ -432,11 +432,11 @@ class RuleFit(BaseEstimator, TransformerMixin):
     def __init__(self,
                 tree_size=4,
                 categorical_cols=None,
-                sample_fract='default', 
+                sample_fract=1, 
                 max_rules=2000,
-                memory_par=0.01,
+                learning_rate=0.01,
                 model_type='lightgbm',
-                mode='regress',
+                mode='classification',
                 lin_trim_quantile=0.025,
                 lin_standardise=True, 
                 exp_rand_tree_size=True,
@@ -444,17 +444,21 @@ class RuleFit(BaseEstimator, TransformerMixin):
                 Cs=None,
                 cv=3,
                 random_state=1024):
-        if model_type not in ('tree', 'forest', 'lightgbm'):
+        if model_type not in ('tree', 'forest', 'gbdt', 'lightgbm'):
             raise ValueError('Supported model types are: {}.'.format(['tree', 'forest', 'lightgbm']))
 
         if mode not in ('classification', 'regression'):
             raise ValueError('Mode should be one of classification and regression.')
 
+        if mode == 'lightgbm' and exp_rand_tree_size:
+            warnings.warn('Randomized tree depth is not supported when using LGBM as rule generator. '
+                          'Using constant depth instead.')
+
         self.tree_size = tree_size
         self.categorical_cols = categorical_cols
         self.sample_fract = sample_fract 
         self.max_rules = max_rules
-        self.memory_par = memory_par
+        self.learning_rate = learning_rate
         self.model_type = model_type
         self.mode = mode
         self.lin_trim_quantile = lin_trim_quantile
@@ -466,108 +470,162 @@ class RuleFit(BaseEstimator, TransformerMixin):
         self.Cs = Cs
         self.random_state = random_state
 
-    def _fit_lightgbm(self, X, y):
-        from lightgbm import LGBMClassifier, LGBMRegressor
-
-        n_estimators = self.max_rules // self.tree_size
-        if self.mode == 'classification':
-            model = LGBMClassifier(num_leaves=self.tree_size, 
-                                   n_estimators=n_estimators,
-                                   zero_as_missing=False)
-        else:
-            model = LGBMRegressor(num_leaves=self.tree_size,
-                                  n_estimators=n_estimators,
-                                  zero_as_missing=False)
-
-    def _fit_random_forest(self, X, y):
-        from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-        
-
-    def _fit_decision_tree(self, X, y):
-        pass
-
-    def fit(self, X, y=None, feature_names=None):
-        """Fit and estimate linear combination of rule ensemble
-
-        """
-        ## Enumerate features if feature names not provided
+    def _fit_scikit_estimator_with_warm_start(self, X, y, clf):
+        """ Used to train RF and GBDT """
         N = X.shape[0]
-        if feature_names is None:
-            self.feature_names = ['feature_' + str(x) for x in range(0, X.shape[1])]
-        else:
-            self.feature_names = feature_names
-        
-        ## initialise tree generator
-        n_estimators_default=int(np.ceil(self.max_rules/self.tree_size))
-        if self.model_type == 'lightgbm':
-            self.tree_generator
-            
-            self.sample_fract_=min(0.5,(100+6*np.sqrt(N))/N)
-            if   self.rfmode=='regress':
-                self.tree_generator = GradientBoostingRegressor(n_estimators=n_estimators_default, max_leaf_nodes=self.tree_size, learning_rate=self.memory_par,subsample=self.sample_fract_,random_state=self.random_state,max_depth=100)
-            else:
-                self.tree_generator = GradientBoostingClassifier(n_estimators=n_estimators_default, max_leaf_nodes=self.tree_size, learning_rate=self.memory_par,subsample=self.sample_fract_,random_state=self.random_state,max_depth=100)
 
-        if self.rfmode=='regress':
-            if type(self.tree_generator) not in [GradientBoostingRegressor,RandomForestRegressor]:
-                raise ValueError("RuleFit only works with RandomForest and BoostingRegressor")
-        else:
-            if type(self.tree_generator) not in [GradientBoostingClassifier,RandomForestClassifier]:
-                raise ValueError("RuleFit only works with RandomForest and BoostingClassifier")
-
-        ## fit tree generator
-        if not self.exp_rand_tree_size: # simply fit with constant tree size
-            self.tree_generator.fit(X, y)
-        else: # randomise tree size as per Friedman 2005 Sec 3.3
+        if not self.exp_rand_tree_size: 
+            # simply fit with constant tree size
+            clf.fit(X, y)
+        else: 
+            # randomise tree size as per Friedman 2005 Sec 3.3
             np.random.seed(self.random_state)
-            tree_sizes=np.random.exponential(scale=self.tree_size-2,size=int(np.ceil(self.max_rules*2/self.tree_size)))
+            tree_sizes=np.random.exponential(scale=self.tree_size-2,
+                                            size=int(np.ceil(self.max_rules*2/self.tree_size)))
             tree_sizes=np.asarray([2+np.floor(tree_sizes[i_]) for i_ in np.arange(len(tree_sizes))],dtype=int)
             i=int(len(tree_sizes)/4)
             while np.sum(tree_sizes[0:i])<self.max_rules:
                 i=i+1
             tree_sizes=tree_sizes[0:i]
-            self.tree_generator.set_params(warm_start=True) 
+            clf.set_params(warm_start=True) 
             curr_est_=0
             for i_size in np.arange(len(tree_sizes)):
                 size=tree_sizes[i_size]
-                self.tree_generator.set_params(n_estimators=curr_est_+1)
-                self.tree_generator.set_params(max_leaf_nodes=size)
-                random_state_add = self.random_state if self.random_state else 0
-                self.tree_generator.set_params(random_state=i_size+random_state_add) # warm_state=True seems to reset random_state, such that the trees are highly correlated, unless we manually change the random_sate here.
-                self.tree_generator.get_params()['n_estimators']
-                self.tree_generator.fit(np.copy(X, order='C'), np.copy(y, order='C'))
-                curr_est_=curr_est_+1
-            self.tree_generator.set_params(warm_start=False) 
-        tree_list = self.tree_generator.estimators_
-        if isinstance(self.tree_generator, RandomForestRegressor) or isinstance(self.tree_generator, RandomForestClassifier):
-             tree_list = [[x] for x in self.tree_generator.estimators_]
-             
-        ## extract rules
-        self.rule_ensemble = RuleEnsemble(tree_list = tree_list,
-                                          feature_names=self.feature_names)
 
-        ## concatenate original features and rules
+                # warm_state=True seems to reset random_state, such that the trees are highly correlated, 
+                # unless we manually change the random_sate here.
+                random_state = self.random_state if self.random_state else 0
+                random_state += i_size
+
+                clf.set_params(**{'n_estimators': curr_est_+1,
+                                'max_leaf_nodes': size,
+                                'random_state': random_state})
+                clf.fit(X, y)
+
+                curr_est_=curr_est_+1
+            clf.set_params(warm_start=False) 
+
+        return clf
+
+    def _fit_random_forest(self, X, y):
+        from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+        
+        N = X.shape[0]
+        n_estimators = self.max_rules // self.tree_size
+        sample_fract = self.sample_fract or min(0.5, (100+6*np.sqrt(N))/N)
+
+        if self.mode == 'classification':
+            clf = RandomForestClassifier(n_estimators=n_estimators,
+                                         max_leaf_nodes=self.tree_size,
+                                         subsample=sample_fract,
+                                         max_depth=100,
+                                         random_state=self.random_state)
+        else:
+            clf = RandomForestRegressor(n_estimators=n_estimators,
+                                         max_leaf_nodes=self.tree_size,
+                                         subsample=sample_fract,
+                                         max_depth=100,
+                                         random_state=self.random_state)
+        
+        return self._fit_scikit_estimator_with_warm_start(X, y, clf)
+
+    def _fit_gbdt(self, X, y):
+        from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor
+
+        N = X.shape[0]
+        n_estimators = self.max_rules // self.tree_size
+        sample_fract = self.sample_fract or min(0.8, (100+6*np.sqrt(N))/N)
+
+        if self.mode == 'classification':
+            clf = GradientBoostingClassifier(n_estimators=n_estimators,
+                                             learning_rate=self.learning_rate,
+                                             max_leaf_nodes=self.tree_size,
+                                             subsample=sample_fract,
+                                             max_depth=100,
+                                             random_state=self.random_state)
+        else:
+            clf = GradientBoostingRegressor(n_estimators=n_estimators,
+                                            learning_rate=self.learning_rate,
+                                            max_leaf_nodes=self.tree_size,
+                                            subsample=sample_fract,
+                                            max_depth=100,
+                                            random_state=self.random_state)
+        
+        return self._fit_scikit_estimator_with_warm_start(X, y, clf)
+
+
+    def _fit_lightgbm(self, X, y):
+        from lightgbm import LGBMClassifier, LGBMRegressor
+
+        N = X.shape[0]
+        n_estimators = self.max_rules // self.tree_size
+        sample_fract = self.sample_fract or min(0.8, (100+6*np.sqrt(N))/N)
+
+        if self.mode == 'classification':
+            model = LGBMClassifier(num_leaves=self.tree_size,
+                                   learning_rate=self.learning_rate,
+                                   subsample=sample_fract,
+                                   n_estimators=n_estimators,
+                                   zero_as_missing=False)
+        else:
+            model = LGBMRegressor(num_leaves=self.tree_size,
+                                  learning_rate=self.learning_rate,
+                                  subsample=sample_fract,
+                                  n_estimators=n_estimators,
+                                  zero_as_missing=False)
+        model.fit(X, y)
+        return model
+
+    def fit(self, X, y=None, feature_names=None):
+        """Fit and estimate linear combination of rule ensemble
+
+        """
+        # Enumerate features if feature names not provided
+        N = X.shape[0]
+
+        if hasattr(X, 'columns'):
+            # X is a DataFrame
+            feature_names = X.columns.tolist()
+            X = X.copy().values
+
+        if feature_names is None:
+            self.feature_names = ['feature_' + str(x) for x in range(0, X.shape[1])]
+        else:
+            self.feature_names = feature_names
+        
+        # build trees
+        if self.model_type in ('tree', 'forest'):
+            model = self._fit_random_forest(X, y)
+        elif self.model_type == 'gbdt':
+            model = self._fit_gbdt(X, y)
+        elif self.model_type == 'lightgbm':
+            model = self._fit_lightgbm(X, y)
+        self.model = model 
+
+        # extract rules
+        self.rule_ensemble = RuleEnsemble(model=model, model_type=self.model_type, feature_names=feature_names)
+
+        # concatenate original features and rules
         X_rules = self.rule_ensemble.transform(X)
         
-        ## standardise linear variables if requested (for regression model only)
-        if 'l' in self.model_type:
+        # standardise linear variables
+        if self.include_linear_features:
             if self.lin_standardise:
                 self.friedscale.train(X)
                 X_regn=self.friedscale.scale(X)
             else:
                 X_regn=X.copy()            
         
-        ## Compile Training data
-        X_concat=np.zeros([X.shape[0],0])
-        if 'l' in self.model_type:
-            X_concat = np.concatenate((X_concat,X_regn), axis=1)
-        if 'r' in self.model_type:
-            if X_rules.shape[0] >0:
-                X_concat = np.concatenate((X_concat, X_rules), axis=1)
+        # prepare training data
+        if self.include_linear_features:
+            X_concat = np.concatenate((X_rules, X_regn), axis=1)
+        else:
+            X_concat = X_rules
 
-        ## fit Lasso
-        if self.rfmode=='regress':
-            if self.Cs is None: # use defaultshasattr(self.Cs, "__len__"):
+        # fit Lasso
+        if self.mode == 'regression':
+            if self.Cs is None: 
+                # use defaultshasattr(self.Cs, "__len__"):
                 n_alphas= 100
                 alphas=None
             elif hasattr(self.Cs, "__len__"):
@@ -589,21 +647,19 @@ class RuleFit(BaseEstimator, TransformerMixin):
         return self
 
     def predict(self, X):
-        """Predict outcome for X
-
-        """
+        """Predict outcome for X"""
         X_concat=np.zeros([X.shape[0],0])
-        if 'l' in self.model_type:
+        if self.include_linear_features:
             if self.lin_standardise:
-                X_concat = np.concatenate((X_concat,self.friedscale.scale(X)), axis=1)
+                X_concat = np.concatenate((X_concat, self.friedscale.scale(X)), axis=1)
             else:
                 X_concat = np.concatenate((X_concat,X), axis=1)
-        if 'r' in self.model_type:
-            rule_coefs=self.coef_[-len(self.rule_ensemble.rules):] 
-            if len(rule_coefs)>0:
-                X_rules = self.rule_ensemble.transform(X,coefs=rule_coefs)
-                if X_rules.shape[0] >0:
-                    X_concat = np.concatenate((X_concat, X_rules), axis=1)
+    
+        rule_coefs = self.coef_[-len(self.rule_ensemble.rules):] 
+        if len(rule_coefs)>0:
+            X_rules = self.rule_ensemble.transform(X,coefs=rule_coefs)
+            if X_rules.shape[0] >0:
+                X_concat = np.concatenate((X_concat, X_rules), axis=1)
         return self.lscv.predict(X_concat)
 
     def transform(self, X=None, y=None):
@@ -656,3 +712,4 @@ class RuleFit(BaseEstimator, TransformerMixin):
         if exclude_zero_coef:
             rules = rules.ix[rules.coef != 0]
         return rules
+ 
