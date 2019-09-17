@@ -231,7 +231,6 @@ def extract_rules_from_scikit_tree(tree, feature_names=None):
     return rules
 
 
-
 def extract_rules_from_lgbm_tree(tree: dict, feature_names=None):
     """ Extract a set of Rule from a tree from a lightgbm booster
         the tree is one of the tree object from booster.dump_model()['tree_info']
@@ -430,88 +429,125 @@ class RuleFit(BaseEstimator, TransformerMixin):
         The names of the features (columns)
 
     """
-    def __init__(self,tree_size=4,sample_fract='default', max_rules=2000,
-                 memory_par=0.01,
-                 tree_generator=None,
-                rfmode='regress',lin_trim_quantile=0.025,
-                lin_standardise=True, exp_rand_tree_size=True,
-                model_type='rl',Cs=None,cv=3,random_state=None):
-        self.tree_generator = tree_generator
-        self.rfmode=rfmode
-        self.lin_trim_quantile=lin_trim_quantile
-        self.lin_standardise=lin_standardise
-        self.friedscale=FriedScale(trim_quantile=lin_trim_quantile)
-        self.exp_rand_tree_size=exp_rand_tree_size
-        self.max_rules=max_rules
-        self.sample_fract=sample_fract 
-        self.max_rules=max_rules
-        self.memory_par=memory_par
-        self.tree_size=tree_size
-        self.random_state=random_state
-        self.model_type=model_type
-        self.cv=cv
-        self.Cs=Cs
+    def __init__(self,
+                tree_size=4,
+                categorical_cols=None,
+                sample_fract='default', 
+                max_rules=2000,
+                memory_par=0.01,
+                model_type='lightgbm',
+                mode='regress',
+                lin_trim_quantile=0.025,
+                lin_standardise=True, 
+                exp_rand_tree_size=True,
+                include_linear_features=True,
+                Cs=None,
+                cv=3,
+                random_state=1024):
+        if model_type not in ('tree', 'forest', 'lightgbm'):
+            raise ValueError('Supported model types are: {}.'.format(['tree', 'forest', 'lightgbm']))
+
+        if mode not in ('classification', 'regression'):
+            raise ValueError('Mode should be one of classification and regression.')
+
+        self.tree_size = tree_size
+        self.categorical_cols = categorical_cols
+        self.sample_fract = sample_fract 
+        self.max_rules = max_rules
+        self.memory_par = memory_par
+        self.model_type = model_type
+        self.mode = mode
+        self.lin_trim_quantile = lin_trim_quantile
+        self.lin_standardise = lin_standardise
+        self.friedscale = FriedScale(trim_quantile=lin_trim_quantile)
+        self.exp_rand_tree_size = exp_rand_tree_size
+        self.include_linear_features = include_linear_features
+        self.cv = cv
+        self.Cs = Cs
+        self.random_state = random_state
+
+    def _fit_lightgbm(self, X, y):
+        from lightgbm import LGBMClassifier, LGBMRegressor
+
+        n_estimators = self.max_rules // self.tree_size
+        if self.mode == 'classification':
+            model = LGBMClassifier(num_leaves=self.tree_size, 
+                                   n_estimators=n_estimators,
+                                   zero_as_missing=False)
+        else:
+            model = LGBMRegressor(num_leaves=self.tree_size,
+                                  n_estimators=n_estimators,
+                                  zero_as_missing=False)
+
+    def _fit_random_forest(self, X, y):
+        from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
         
+
+    def _fit_decision_tree(self, X, y):
+        pass
+
     def fit(self, X, y=None, feature_names=None):
         """Fit and estimate linear combination of rule ensemble
 
         """
         ## Enumerate features if feature names not provided
-        N=X.shape[0]
+        N = X.shape[0]
         if feature_names is None:
             self.feature_names = ['feature_' + str(x) for x in range(0, X.shape[1])]
         else:
-            self.feature_names=feature_names
-        if 'r' in self.model_type:
-            ## initialise tree generator
-            if self.tree_generator is None:
-                n_estimators_default=int(np.ceil(self.max_rules/self.tree_size))
-                self.sample_fract_=min(0.5,(100+6*np.sqrt(N))/N)
-                if   self.rfmode=='regress':
-                    self.tree_generator = GradientBoostingRegressor(n_estimators=n_estimators_default, max_leaf_nodes=self.tree_size, learning_rate=self.memory_par,subsample=self.sample_fract_,random_state=self.random_state,max_depth=100)
-                else:
-                    self.tree_generator = GradientBoostingClassifier(n_estimators=n_estimators_default, max_leaf_nodes=self.tree_size, learning_rate=self.memory_par,subsample=self.sample_fract_,random_state=self.random_state,max_depth=100)
-    
-            if self.rfmode=='regress':
-                if type(self.tree_generator) not in [GradientBoostingRegressor,RandomForestRegressor]:
-                    raise ValueError("RuleFit only works with RandomForest and BoostingRegressor")
+            self.feature_names = feature_names
+        
+        ## initialise tree generator
+        n_estimators_default=int(np.ceil(self.max_rules/self.tree_size))
+        if self.model_type == 'lightgbm':
+            self.tree_generator
+            
+            self.sample_fract_=min(0.5,(100+6*np.sqrt(N))/N)
+            if   self.rfmode=='regress':
+                self.tree_generator = GradientBoostingRegressor(n_estimators=n_estimators_default, max_leaf_nodes=self.tree_size, learning_rate=self.memory_par,subsample=self.sample_fract_,random_state=self.random_state,max_depth=100)
             else:
-                if type(self.tree_generator) not in [GradientBoostingClassifier,RandomForestClassifier]:
-                    raise ValueError("RuleFit only works with RandomForest and BoostingClassifier")
-    
-            ## fit tree generator
-            if not self.exp_rand_tree_size: # simply fit with constant tree size
-                self.tree_generator.fit(X, y)
-            else: # randomise tree size as per Friedman 2005 Sec 3.3
-                np.random.seed(self.random_state)
-                tree_sizes=np.random.exponential(scale=self.tree_size-2,size=int(np.ceil(self.max_rules*2/self.tree_size)))
-                tree_sizes=np.asarray([2+np.floor(tree_sizes[i_]) for i_ in np.arange(len(tree_sizes))],dtype=int)
-                i=int(len(tree_sizes)/4)
-                while np.sum(tree_sizes[0:i])<self.max_rules:
-                    i=i+1
-                tree_sizes=tree_sizes[0:i]
-                self.tree_generator.set_params(warm_start=True) 
-                curr_est_=0
-                for i_size in np.arange(len(tree_sizes)):
-                    size=tree_sizes[i_size]
-                    self.tree_generator.set_params(n_estimators=curr_est_+1)
-                    self.tree_generator.set_params(max_leaf_nodes=size)
-                    random_state_add = self.random_state if self.random_state else 0
-                    self.tree_generator.set_params(random_state=i_size+random_state_add) # warm_state=True seems to reset random_state, such that the trees are highly correlated, unless we manually change the random_sate here.
-                    self.tree_generator.get_params()['n_estimators']
-                    self.tree_generator.fit(np.copy(X, order='C'), np.copy(y, order='C'))
-                    curr_est_=curr_est_+1
-                self.tree_generator.set_params(warm_start=False) 
-            tree_list = self.tree_generator.estimators_
-            if isinstance(self.tree_generator, RandomForestRegressor) or isinstance(self.tree_generator, RandomForestClassifier):
-                 tree_list = [[x] for x in self.tree_generator.estimators_]
-                 
-            ## extract rules
-            self.rule_ensemble = RuleEnsemble(tree_list = tree_list,
-                                              feature_names=self.feature_names)
+                self.tree_generator = GradientBoostingClassifier(n_estimators=n_estimators_default, max_leaf_nodes=self.tree_size, learning_rate=self.memory_par,subsample=self.sample_fract_,random_state=self.random_state,max_depth=100)
 
-            ## concatenate original features and rules
-            X_rules = self.rule_ensemble.transform(X)
+        if self.rfmode=='regress':
+            if type(self.tree_generator) not in [GradientBoostingRegressor,RandomForestRegressor]:
+                raise ValueError("RuleFit only works with RandomForest and BoostingRegressor")
+        else:
+            if type(self.tree_generator) not in [GradientBoostingClassifier,RandomForestClassifier]:
+                raise ValueError("RuleFit only works with RandomForest and BoostingClassifier")
+
+        ## fit tree generator
+        if not self.exp_rand_tree_size: # simply fit with constant tree size
+            self.tree_generator.fit(X, y)
+        else: # randomise tree size as per Friedman 2005 Sec 3.3
+            np.random.seed(self.random_state)
+            tree_sizes=np.random.exponential(scale=self.tree_size-2,size=int(np.ceil(self.max_rules*2/self.tree_size)))
+            tree_sizes=np.asarray([2+np.floor(tree_sizes[i_]) for i_ in np.arange(len(tree_sizes))],dtype=int)
+            i=int(len(tree_sizes)/4)
+            while np.sum(tree_sizes[0:i])<self.max_rules:
+                i=i+1
+            tree_sizes=tree_sizes[0:i]
+            self.tree_generator.set_params(warm_start=True) 
+            curr_est_=0
+            for i_size in np.arange(len(tree_sizes)):
+                size=tree_sizes[i_size]
+                self.tree_generator.set_params(n_estimators=curr_est_+1)
+                self.tree_generator.set_params(max_leaf_nodes=size)
+                random_state_add = self.random_state if self.random_state else 0
+                self.tree_generator.set_params(random_state=i_size+random_state_add) # warm_state=True seems to reset random_state, such that the trees are highly correlated, unless we manually change the random_sate here.
+                self.tree_generator.get_params()['n_estimators']
+                self.tree_generator.fit(np.copy(X, order='C'), np.copy(y, order='C'))
+                curr_est_=curr_est_+1
+            self.tree_generator.set_params(warm_start=False) 
+        tree_list = self.tree_generator.estimators_
+        if isinstance(self.tree_generator, RandomForestRegressor) or isinstance(self.tree_generator, RandomForestClassifier):
+             tree_list = [[x] for x in self.tree_generator.estimators_]
+             
+        ## extract rules
+        self.rule_ensemble = RuleEnsemble(tree_list = tree_list,
+                                          feature_names=self.feature_names)
+
+        ## concatenate original features and rules
+        X_rules = self.rule_ensemble.transform(X)
         
         ## standardise linear variables if requested (for regression model only)
         if 'l' in self.model_type:
