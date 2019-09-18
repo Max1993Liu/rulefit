@@ -19,6 +19,10 @@ from sklearn.linear_model import LassoCV, LogisticRegressionCV
 from functools import reduce
 
 
+__all__ = ['RuleFit']
+
+
+
 class Winsorizer():
     """Performs Winsorization 1->1*
     Warning: this class should not be used directly.
