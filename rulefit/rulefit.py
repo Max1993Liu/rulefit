@@ -19,74 +19,28 @@ from sklearn.linear_model import LassoCV, LogisticRegressionCV
 from functools import reduce
 
 
-
-class RuleCondition():
-    """Class for binary rule condition
-
+class Winsorizer():
+    """Performs Winsorization 1->1*
     Warning: this class should not be used directly.
-    """
-
-    def __init__(self,
-                 feature_index,
-                 threshold,
-                 operator,
-                 support,
-                 na_direction=None,
-                 feature_name=None):
-        self.feature_index = feature_index
-        self.threshold = threshold
-        self.operator = operator
-        self.support = support
-        self.na_direction = na_direction
-        self.feature_name = feature_name
-
-    def __repr__(self):
-        return self.__str__()
-
-    def __str__(self):
-        if self.feature_name:
-            feature = self.feature_name
-        else:
-            feature = self.feature_index
-        return "%s %s %s" % (feature, self.operator, self.threshold)
-
-    def transform(self, X):
-        """Transform dataset.
-
-        Parameters
-        ----------
-        X: array-like matrix, shape=(n_samples, n_features)
-
-        Returns
-        -------
-        X_transformed: array-like matrix, shape=(n_samples, 1)
-        """
-        # if na_direction is 'left', missing values would result in the left branch
-        # aka. it will get the same value as if it meets the criteria
-        if self.operator == "<=":
-            res = 1 * (X[:,self.feature_index] <= self.threshold)
-        elif self.operator == ">":
-            res = 1 * (X[:,self.feature_index] > self.threshold)
-        elif self.operator == '==':
-            res = 1 * np.array([i in self.threshold for i in X[:, self.feature_index]])
-        elif self.operator == '!=':
-            res = 1 * np.array([i not in self.threshold for i in X[:, self.feature_index]])
-        else:
-            raise ValueError('{} is not a valid operator'.format(self.operator))
-
-        if self.na_direction is not None:
-            na_ind = np.isnan(X[:, self.feature_index])
-            res[na_ind] = int(self.na_direction == 'left')
-        return res
-
-    def __eq__(self, other):
-        return self.__hash__() == other.__hash__()
-
-    def __hash__(self):
-        return hash((self.feature_index, 
-                    tuple(self.threshold) if isinstance(self.threshold, list) else self.threshold, 
-                    self.operator, 
-                    self.feature_name))
+    """    
+    def __init__(self,trim_quantile=0.0):
+        self.trim_quantile=trim_quantile
+        self.winsor_lims=None
+        
+    def train(self,X):
+        # get winsor limits
+        self.winsor_lims=np.ones([2,X.shape[1]])*np.inf
+        self.winsor_lims[0,:]=-np.inf
+        if self.trim_quantile>0:
+            for i_col in np.arange(X.shape[1]):
+                lower=np.percentile(X[:,i_col],self.trim_quantile*100)
+                upper=np.percentile(X[:,i_col],100-self.trim_quantile*100)
+                self.winsor_lims[:,i_col]=[lower,upper]
+        
+    def trim(self,X):
+        X_=X.copy()
+        X_=np.where(X>self.winsor_lims[1,:],np.tile(self.winsor_lims[1,:],[X.shape[0],1]),np.where(X<self.winsor_lims[0,:],np.tile(self.winsor_lims[0,:],[X.shape[0],1]),X))
+        return X_
 
 
 class FriedScale():
@@ -128,7 +82,66 @@ class FriedScale():
         X_=X.copy()
         X_=np.where(X>self.winsor_lims[1,:],np.tile(self.winsor_lims[1,:],[X.shape[0],1]),np.where(X<self.winsor_lims[0,:],np.tile(self.winsor_lims[0,:],[X.shape[0],1]),X))
         return X_
-        
+
+
+
+class RuleCondition():
+    """Class for binary rule condition
+
+    Warning: this class should not be used directly.
+    """
+
+    def __init__(self,
+                 feature_index,
+                 threshold,
+                 operator,
+                 support,
+                 na_direction=None,
+                 feature_name=None):
+        self.feature_index = feature_index
+        self.threshold = threshold
+        self.operator = operator
+        self.support = support
+        self.na_direction = na_direction
+        self.feature_name = feature_name
+
+    def __repr__(self):
+        return self.__str__()
+
+    def __str__(self):
+        if self.feature_name:
+            feature = self.feature_name
+        else:
+            feature = self.feature_index
+        return "%s %s %s" % (feature, self.operator, self.threshold)
+
+    def transform(self, X: pd.Series):
+        if self.operator == "<=":
+            res = 1 * (X[:,self.feature_index] <= self.threshold)
+        elif self.operator == ">":
+            res = 1 * (X[:,self.feature_index] > self.threshold)
+        elif self.operator == '==':
+            res = 1 * np.array([i in self.threshold for i in X[:, self.feature_index]])
+        elif self.operator == '!=':
+            res = 1 * np.array([i not in self.threshold for i in X[:, self.feature_index]])
+        else:
+            raise ValueError('{} is not a valid operator'.format(self.operator))
+
+        if self.na_direction is not None:
+            na_ind = np.isnan(X[:, self.feature_index])
+            res[na_ind] = int(self.na_direction == 'left')
+        return res
+
+    def __eq__(self, other):
+        return self.__hash__() == other.__hash__()
+
+    def __hash__(self):
+        return hash((self.feature_index, 
+                    tuple(self.threshold) if isinstance(self.threshold, list) else self.threshold, 
+                    self.operator, 
+                    self.feature_name))
+
+
 
 class Rule():
     """Class for binary Rules from list of conditions
@@ -141,19 +154,12 @@ class Rule():
         # self.prediction_value=prediction_value
         # self.rule_direction=None
 
-    def transform(self, X):
-        """Transform dataset.
-
-        Parameters
-        ----------
-        X: array-like matrix
-
-        Returns
-        -------
-        X_transformed: array-like matrix, shape=(n_samples, 1)
-        """
+    def transform(self, X: pd.Series):
         rule_applies = [condition.transform(X) for condition in self.conditions]
         return reduce(lambda x, y: x * y, rule_applies)
+
+    def __len__(self):
+        return len(self.conditions)
 
     def __str__(self):
         return  " & ".join([x.__str__() for x in self.conditions])
@@ -361,7 +367,7 @@ class RuleEnsemble():
         self.rules = list(filter(lambda x: func(x), self.rules))
 
     def filter_short_rules(self, k):
-        self.filter_rules(lambda x: len(x.conditions) > k)
+        self.filter_rules(lambda x: len(x) > k)
 
     def transform(self, X, coefs=None):
         """Transform dataset.
@@ -573,7 +579,7 @@ class RuleFit(BaseEstimator, TransformerMixin):
                                   subsample=sample_fract,
                                   n_estimators=n_estimators,
                                   zero_as_missing=False)
-        model.fit(X, y)
+        model.fit(X, y, feature_name=self.feature_names, categorical_feature=self.categorical_cols)
         return model
 
     def fit(self, X, y=None, feature_names=None):
@@ -594,8 +600,12 @@ class RuleFit(BaseEstimator, TransformerMixin):
             self.feature_names = feature_names
         
         # build trees
-        if self.model_type in ('tree', 'forest'):
+        if self.model_type == 'forest':
             model = self._fit_random_forest(X, y)
+        elif self.model_type == 'tree':
+            # build a list of decision trees by training a RF
+            model = self._fit_random_forest(X, y)
+            model = model.estimators_
         elif self.model_type == 'gbdt':
             model = self._fit_gbdt(X, y)
         elif self.model_type == 'lightgbm':
