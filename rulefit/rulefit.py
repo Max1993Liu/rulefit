@@ -120,20 +120,24 @@ class RuleCondition():
         return "%s %s %s" % (feature, self.operator, self.threshold)
 
     def transform(self, X: pd.Series):
-        if self.operator == "<=":
-            res = 1 * (X[:,self.feature_index] <= self.threshold)
-        elif self.operator == ">":
-            res = 1 * (X[:,self.feature_index] > self.threshold)
-        elif self.operator == '==':
-            res = 1 * np.array([i in self.threshold for i in X[:, self.feature_index]])
-        elif self.operator == '!=':
-            res = 1 * np.array([i not in self.threshold for i in X[:, self.feature_index]])
-        else:
-            raise ValueError('{} is not a valid operator'.format(self.operator))
+        with warnings.catch_warnings():
+            # Suppress RuntimeWarnings from NaN values
+            warnings.filterwarnings('ignore')
 
-        if self.na_direction is not None:
-            na_ind = np.isnan(X[:, self.feature_index])
-            res[na_ind] = int(self.na_direction == 'left')
+            if self.operator == "<=":
+                res = 1 * (X[:,self.feature_index] <= self.threshold)
+            elif self.operator == ">":
+                res = 1 * (X[:,self.feature_index] > self.threshold)
+            elif self.operator == '==':
+                res = 1 * np.array([i in self.threshold for i in X[:, self.feature_index]])
+            elif self.operator == '!=':
+                res = 1 * np.array([i not in self.threshold for i in X[:, self.feature_index]])
+            else:
+                raise ValueError('{} is not a valid operator'.format(self.operator))
+
+            if self.na_direction is not None:
+                na_ind = np.isnan(X[:, self.feature_index])
+                res[na_ind] = int(self.na_direction == 'left')
         return res
 
     def __eq__(self, other):
