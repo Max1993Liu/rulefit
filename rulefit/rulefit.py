@@ -16,6 +16,7 @@ import warnings
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.ensemble import GradientBoostingRegressor, GradientBoostingClassifier, RandomForestRegressor, RandomForestClassifier
 from sklearn.linear_model import LassoCV, LogisticRegressionCV
+from sklearn.linear_model import Lasso, LogisticRegression
 from functools import reduce
 
 
@@ -458,6 +459,7 @@ class RuleFit(BaseEstimator, TransformerMixin):
                 lin_standardise=True, 
                 exp_rand_tree_size=True,
                 include_linear_features=True,
+                fit_with_cv=False,
                 Cs=None,
                 cv=3,
                 verbose=1,
@@ -485,6 +487,7 @@ class RuleFit(BaseEstimator, TransformerMixin):
         self.friedscale = FriedScale(trim_quantile=lin_trim_quantile)
         self.exp_rand_tree_size = exp_rand_tree_size
         self.include_linear_features = include_linear_features
+        self.fit_with_cv = fit_with_cv
         self.cv = cv
         self.Cs = Cs
         self.verbose = verbose
@@ -655,25 +658,32 @@ class RuleFit(BaseEstimator, TransformerMixin):
 
         # fit Lasso
         if self.mode == 'regression':
-            if self.Cs is None: 
-                # use defaultshasattr(self.Cs, "__len__"):
-                n_alphas= 100
-                alphas=None
-            elif hasattr(self.Cs, "__len__"):
-                n_alphas= None
-                alphas=1./self.Cs
+            if self.fit_with_cv:
+                if self.Cs is None:
+                    # use defaultshasattr(self.Cs, "__len__"):
+                    n_alphas= 100
+                    alphas=None
+                elif hasattr(self.Cs, "__len__"):
+                    n_alphas= None
+                    alphas=1./self.Cs
+                else:
+                    n_alphas= self.Cs
+                    alphas=None
+                self.lscv = LassoCV(n_alphas=n_alphas,alphas=alphas,cv=self.cv,verbose=self.verbose,
+                                    random_state=self.random_state, n_jobs=self.n_jobs)
             else:
-                n_alphas= self.Cs
-                alphas=None
-            self.lscv = LassoCV(n_alphas=n_alphas,alphas=alphas,cv=self.cv,verbose=self.verbose,
-                                random_state=self.random_state, n_jobs=self.n_jobs)
+                self.lscv = Lasso(verbose=self.verbose, random_state=self.random_state)
             self.lscv.fit(X_concat, y)
             self.coef_=self.lscv.coef_
             self.intercept_=self.lscv.intercept_
         else:
-            Cs=10 if self.Cs is None else self.Cs
-            self.lscv=LogisticRegressionCV(Cs=Cs,cv=self.cv,penalty='l1',verbose=self.verbose,
-                                            random_state=self.random_state,solver='liblinear', n_jobs=self.n_jobs)
+            if self.fit_with_cv:
+                Cs=10 if self.Cs is None else self.Cs
+                self.lscv=LogisticRegressionCV(Cs=Cs,cv=self.cv,penalty='l1',verbose=self.verbose,
+                                            random_state=self.random_state,solver='liblinear',n_jobs=self.n_jobs)
+            else:
+                self.lscv=LogisticRegression(penalty='l1',random_state=self.random_state,
+                                            verbose=self.verbose,solver='liblinear')
             self.lscv.fit(X_concat, y)
             self.coef_=self.lscv.coef_[0]
             self.intercept_=self.lscv.intercept_[0]
