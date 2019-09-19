@@ -351,6 +351,9 @@ class RuleEnsemble():
         self._extract_rules()
         self.rules= list(self.rules)
 
+    def __len__(self):
+        return len(self.rules)
+
     def _extract_rules(self):
         """ Recursively extract rules from the model """
         if self.model_type == 'tree':
@@ -457,6 +460,7 @@ class RuleFit(BaseEstimator, TransformerMixin):
                 include_linear_features=True,
                 Cs=None,
                 cv=3,
+                verbose=1,
                 random_state=1024):
         if model_type not in ('tree', 'forest', 'gbdt', 'lightgbm'):
             raise ValueError('Supported model types are: {}.'.format(['tree', 'forest', 'lightgbm']))
@@ -482,6 +486,7 @@ class RuleFit(BaseEstimator, TransformerMixin):
         self.include_linear_features = include_linear_features
         self.cv = cv
         self.Cs = Cs
+        self.verbose = verbose
         self.random_state = random_state
 
     def _fit_scikit_estimator_with_warm_start(self, X, y, clf):
@@ -619,12 +624,18 @@ class RuleFit(BaseEstimator, TransformerMixin):
         elif self.model_type == 'lightgbm':
             model = self._fit_lightgbm(X, y)
         self.model = model 
+        
+        if self.verbose:
+            print('{} training complete'.format(self.model_type.capitalize()))
 
         # extract rules
         self.rule_ensemble = RuleEnsemble(model=model, model_type=self.model_type, feature_names=feature_names)
 
         # concatenate original features and rules
         X_rules = self.rule_ensemble.transform(X)
+
+        if self.verbose:
+            print('{} rules were applied'.format(len(self.rule_ensemble)))
         
         # standardise linear variables
         if self.include_linear_features:
@@ -638,7 +649,7 @@ class RuleFit(BaseEstimator, TransformerMixin):
         if self.include_linear_features:
             X_concat = np.concatenate((X_rules, X_regn), axis=1)
         else:
-            X_concat = X_rules
+            X_concat = X_rules    
 
         # fit Lasso
         if self.mode == 'regression':
@@ -652,13 +663,15 @@ class RuleFit(BaseEstimator, TransformerMixin):
             else:
                 n_alphas= self.Cs
                 alphas=None
-            self.lscv = LassoCV(n_alphas=n_alphas,alphas=alphas,cv=self.cv,random_state=self.random_state)
+            self.lscv = LassoCV(n_alphas=n_alphas,alphas=alphas,cv=self.cv,verbose=self.verbose,
+                                random_state=self.random_state)
             self.lscv.fit(X_concat, y)
             self.coef_=self.lscv.coef_
             self.intercept_=self.lscv.intercept_
         else:
             Cs=10 if self.Cs is None else self.Cs
-            self.lscv=LogisticRegressionCV(Cs=Cs,cv=self.cv,penalty='l1',random_state=self.random_state,solver='liblinear')
+            self.lscv=LogisticRegressionCV(Cs=Cs,cv=self.cv,penalty='l1',verbose=self.verbose,
+                                            random_state=self.random_state,solver='liblinear')
             self.lscv.fit(X_concat, y)
             self.coef_=self.lscv.coef_[0]
             self.intercept_=self.lscv.intercept_[0]
