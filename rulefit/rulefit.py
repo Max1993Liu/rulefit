@@ -656,6 +656,9 @@ class RuleFit(BaseEstimator, TransformerMixin):
         else:
             X_concat = X_rules    
 
+        if self.verbose:
+            print('Start LR training.')
+
         # fit Lasso
         if self.mode == 'regression':
             if self.fit_with_cv:
