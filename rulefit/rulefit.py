@@ -645,9 +645,9 @@ class RuleFit(BaseEstimator, TransformerMixin):
             else:
                 X_regn=X.copy()            
         
-        # prepare training data
+        # prepare training data, rule features are appended to the right
         if self.include_linear_features:
-            X_concat = np.concatenate((X_rules, X_regn), axis=1)
+            X_concat = np.concatenate((X_regn, X_rules), axis=1)
         else:
             X_concat = X_rules    
 
@@ -689,7 +689,7 @@ class RuleFit(BaseEstimator, TransformerMixin):
         rule_coefs = self.coef_[-len(self.rule_ensemble.rules):] 
         if len(rule_coefs)>0:
             X_rules = self.rule_ensemble.transform(X,coefs=rule_coefs)
-            if X_rules.shape[0] >0:
+            if X_rules.shape[0]>0:
                 X_concat = np.concatenate((X_concat, X_rules), axis=1)
         return self.lscv.predict(X_concat)
 
@@ -733,13 +733,14 @@ class RuleFit(BaseEstimator, TransformerMixin):
                 coef=self.coef_[i]*self.friedscale.scale_multipliers[i]
             else:
                 coef=self.coef_[i]
-            output_rules += [(self.feature_names[i], 'linear',coef, 1)]
+            output_rules += [(self.feature_names[i], 'linear',coef, 1, None)]
         ## Add rules
         for i in range(0, len(self.rule_ensemble.rules)):
             rule = rule_ensemble[i]
             coef=self.coef_[i + n_features]
-            output_rules += [(rule.__str__(), 'rule', coef,  rule.support)]
-        rules = pd.DataFrame(output_rules, columns=["rule", "type","coef", "support"])
+            output_rules += [(rule.__str__(), 'rule', coef,  
+                            rule.support, abs(coef) * rule.support * (1 - rule.support))]
+        rules = pd.DataFrame(output_rules, columns=["rule", "type","coef", "support", "importance"])
         if exclude_zero_coef:
             rules = rules.ix[rules.coef != 0]
         return rules
