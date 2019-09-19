@@ -461,6 +461,7 @@ class RuleFit(BaseEstimator, TransformerMixin):
                 Cs=None,
                 cv=3,
                 verbose=1,
+                n_jobs=1,
                 random_state=1024):
         if model_type not in ('tree', 'forest', 'gbdt', 'lightgbm'):
             raise ValueError('Supported model types are: {}.'.format(['tree', 'forest', 'lightgbm']))
@@ -487,6 +488,7 @@ class RuleFit(BaseEstimator, TransformerMixin):
         self.cv = cv
         self.Cs = Cs
         self.verbose = verbose
+        self.n_jobs = n_jobs
         self.random_state = random_state
 
     def _fit_scikit_estimator_with_warm_start(self, X, y, clf):
@@ -664,14 +666,14 @@ class RuleFit(BaseEstimator, TransformerMixin):
                 n_alphas= self.Cs
                 alphas=None
             self.lscv = LassoCV(n_alphas=n_alphas,alphas=alphas,cv=self.cv,verbose=self.verbose,
-                                random_state=self.random_state)
+                                random_state=self.random_state, n_jobs=self.n_jobs)
             self.lscv.fit(X_concat, y)
             self.coef_=self.lscv.coef_
             self.intercept_=self.lscv.intercept_
         else:
             Cs=10 if self.Cs is None else self.Cs
             self.lscv=LogisticRegressionCV(Cs=Cs,cv=self.cv,penalty='l1',verbose=self.verbose,
-                                            random_state=self.random_state,solver='liblinear')
+                                            random_state=self.random_state,solver='liblinear', n_jobs=self.n_jobs)
             self.lscv.fit(X_concat, y)
             self.coef_=self.lscv.coef_[0]
             self.intercept_=self.lscv.intercept_[0]
