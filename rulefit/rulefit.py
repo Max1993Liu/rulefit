@@ -157,6 +157,8 @@ class RuleCondition:
 
         if operator in ('==', '!='):
             threshold = [float(i.strip()) for i in threshold[1:-1].split(",")]
+        else:
+            threshold = float(threshold)
 
         if feature_idx.startswith('feature_'):
             feature_index, feature_name = int(feature_idx.split('_')[1]), None
@@ -169,7 +171,7 @@ class RuleCondition:
                     support=0,
                     feature_name=feature_name)
 
-    def transform(self, X: pd.Series):
+    def transform(self, X):
         with warnings.catch_warnings():
             # Suppress RuntimeWarnings from NaN values
             warnings.filterwarnings("ignore")
@@ -238,11 +240,11 @@ class Rule:
             if cond.feature_index is not None and cond.feature_name is None:
                 cond.feature_name = feature_names[cond.feature_index]
             if cond.feature_name is not None and cond.feature_index is None:
-                cond_feature_index = list(feature_names).index(cond.feature_name)
+                cond.feature_index = list(feature_names).index(cond.feature_name)
             conditions.append(cond)
         self.conditions = set(conditions)
 
-    def transform(self, X: pd.Series):
+    def transform(self, X):
         rule_applies = [condition.transform(X) for condition in self.conditions]
         return reduce(lambda x, y: x * y, rule_applies)
 
@@ -803,7 +805,7 @@ class RuleFit(BaseEstimator, TransformerMixin):
             if self.verbose:
                 print("{} training complete".format(self.model_type.capitalize()))
         else:
-            self.model = model
+            self.model = model = prefitted_model
 
             if self.verbose:
                 print('Using a prefitted model.')
