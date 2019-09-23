@@ -128,6 +128,8 @@ class RuleCondition:
         na_direction=None,
         feature_name=None,
     ):
+        if operator not in ('<=', '>', '==', '!='):
+            raise ValueError('Operator {} is not supported.'.format(operator))
         self.feature_index = feature_index
         self.threshold = threshold
         self.operator = operator
@@ -149,11 +151,12 @@ class RuleCondition:
     def from_string(cls, s: str):
         """ Create a RuleCondition from a string, which should match the following syntax:
             feature_{i} (<=|>|==|!=) threshold
+            Make sure there's no space in threshold
         """
         feature_idx, operator, threshold, *kwargs = s.split()
 
         if operator in ('==', '!='):
-            threshold = [float(i.strip()) for i in threshold.split(",")]
+            threshold = [float(i.strip()) for i in threshold[1:-1].split(",")]
 
         if feature_idx.startswith('feature_'):
             feature_index, feature_name = int(feature_idx.split('_')[1]), None
@@ -427,9 +430,10 @@ class RuleEnsemble:
         self.model_type = model_type
         self.feature_names = feature_names
         self.rules = set()
-        ## TODO: Move this out of __init__
-        self._extract_rules()
-        # self.rules = list(self.rules)
+        if self.model is not None:
+            ## TODO: Move this out of __init__
+            self._extract_rules()
+            # self.rules = list(self.rules)
 
     def __len__(self):
         return len(self.rules)
@@ -463,8 +467,10 @@ class RuleEnsemble:
     def add_rule(self, rule):
         if isinstance(rule, str):
             rule = Rule.from_string(rule)
-            if self.feature_names is not None:
-                rule.update_feature_information(self.feature_names)
+        
+        if self.feature_names is not None:
+            rule.update_feature_information(self.feature_names)
+        
         self.rules.add(rule)
 
     def add_rules(self, rules):
@@ -781,7 +787,7 @@ class RuleFit(BaseEstimator, TransformerMixin):
             self.feature_names = feature_names
 
         # build trees
-        if prefitted_model is None
+        if prefitted_model is None:
             if self.model_type == "forest":
                 model = self._fit_random_forest(X, y)
             elif self.model_type == "tree":
