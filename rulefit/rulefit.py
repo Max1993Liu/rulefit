@@ -145,6 +145,27 @@ class RuleCondition:
             feature = self.feature_index
         return "%s %s %s" % (feature, self.operator, self.threshold)
 
+    @classmethod
+    def from_string(cls, s: str):
+        """ Create a RuleCondition from a string, which should match the following syntax:
+            feature_{i} (<=|>|==|!=) threshold
+        """
+        feature_idx, operator, threshold, *kwargs = s.split()
+
+        if operator in ('==', '!='):
+            threshold = [float(i.strip()) for i in threshold.split(",")]
+
+        if feature_idx.startswith('feature_'):
+            feature_index, feature_name = int(feature_idx.split('_')[1]), None
+        else:
+            feature_index, feature_name = None, feature_idx
+
+        return cls(feature_index=feature_index, 
+                    threshold=threshold,
+                    operator=operator,
+                    support=0,
+                    feature_name=feature_name)
+
     def transform(self, X: pd.Series):
         with warnings.catch_warnings():
             # Suppress RuntimeWarnings from NaN values
@@ -197,6 +218,26 @@ class Rule:
         self.support = min([x.support for x in rule_conditions])
         # self.prediction_value=prediction_value
         # self.rule_direction=None
+
+    @classmethod
+    def from_string(cls, s: str):
+        """ Parse a rule from string, each RuleCondition is seperated by `&` """
+        rules = [r.strip() for r in s.split('&')]
+        rules = [RuleCondition.from_string(r) for r in rules]
+        return cls(rules)
+
+    def update_feature_information(self, feature_names):
+        """ Update the `feature_name` or `feature_index` attribute for each RuleConditaion
+            if only one of them is provided
+         """
+        conditions = []
+        for cond in self.conditions:
+            if cond.feature_index is not None and cond.feature_name is None:
+                cond.feature_name = feature_names[cond.feature_index]
+            if cond.feature_name is not None and cond.feature_index is None:
+                cond_feature_index = list(feature_names).index(cond.feature_name)
+            conditions.append(cond)
+        self.conditions = set(conditions)
 
     def transform(self, X: pd.Series):
         rule_applies = [condition.transform(X) for condition in self.conditions]
@@ -388,7 +429,7 @@ class RuleEnsemble:
         self.rules = set()
         ## TODO: Move this out of __init__
         self._extract_rules()
-        self.rules = list(self.rules)
+        # self.rules = list(self.rules)
 
     def __len__(self):
         return len(self.rules)
@@ -419,8 +460,19 @@ class RuleEnsemble:
                     )
                     self.rules.update(rules)
 
+    def add_rule(self, rule):
+        if isinstance(rule, str):
+            rule = Rule.from_string(rule)
+            if self.feature_names is not None:
+                rule.update_feature_information(self.feature_names)
+        self.rules.add(rule)
+
+    def add_rules(self, rules):
+        for rule in rules:
+            self.add_rule(rule)
+
     def filter_rules(self, func):
-        self.rules = list(filter(lambda x: func(x), self.rules))
+        self.rules = set(filter(lambda x: func(x), self.rules))
 
     def filter_short_rules(self, k):
         self.filter_rules(lambda x: len(x) > k)
@@ -683,6 +735,34 @@ class RuleFit(BaseEstimator, TransformerMixin):
         )
         return model
 
+    def add_rule(self, rule):
+        """ Add a single rule, which will be combined with rules parsed from generators. """
+        if hasattr(self, 'mannual_rules'):
+            self.mannual_rules.add(rule)
+        else:
+            self.mannual_rules = set([rule])
+
+    def add_rules(self, rules):
+        """ Add a bunch of rules, which will be combined with rules parsed from generators. """
+        if hasattr(self, 'mannual_rules'):
+            self.mannual_rules.update(rules)
+        else:
+            self.mannual_rules = set(rules)
+
+    def register_filter(self, filter):
+        """ Register a filter function that will be called on the rules after fitting """
+        if hasattr(self, 'rule_filter'):
+            self.rule_filter.append(filter)
+        else:
+            self.rule_filter = [filter]
+
+    def register_filters(self, filters):
+        """ Register filter functions that will be called on the rules after fitting """
+        if hasattr(self, 'rule_filter'):
+            self.rule_filter.extend(filters)
+        else:
+            self.rule_filter = filters
+
     def fit(self, X, y=None, feature_names=None):
         """Fit and estimate linear combination of rule ensemble
 
@@ -720,6 +800,19 @@ class RuleFit(BaseEstimator, TransformerMixin):
         self.rule_ensemble = RuleEnsemble(
             model=model, model_type=self.model_type, feature_names=feature_names
         )
+
+        # add additional mannual specified rules if there's any
+        if hasattr(self, 'mannual_rules'):
+            if self.verbose:
+                print('Add {} mannual rules'.format(len(self.mannual_rules)))
+            self.rule_ensemble.add_rules(self.mannual_rules)
+
+        # apply registered filters
+        if hasattr(self, 'rule_filter'):
+            if self.verbose:
+                print('Apply {} registered filters.'.format(len(self.rule_filter)))
+            for f in self.rule_filter:
+                self.rule_ensemble.filter_rules(f)
 
         # concatenate original features and rules
         X_rules = self.rule_ensemble.transform(X)
