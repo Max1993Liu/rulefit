@@ -763,9 +763,9 @@ class RuleFit(BaseEstimator, TransformerMixin):
         else:
             self.rule_filter = filters
 
-    def fit(self, X, y=None, feature_names=None):
-        """Fit and estimate linear combination of rule ensemble
-
+    def fit(self, X, y=None, feature_names=None, prefitted_model=None):
+        """ Fit and estimate linear combination of rule ensemble
+            :param prefitted_model: A trained `tree` type model that will be used for generating features
         """
         # Enumerate features if feature names not provided
         N = X.shape[0]
@@ -781,20 +781,26 @@ class RuleFit(BaseEstimator, TransformerMixin):
             self.feature_names = feature_names
 
         # build trees
-        if self.model_type == "forest":
-            model = self._fit_random_forest(X, y)
-        elif self.model_type == "tree":
-            # build a list of decision trees by training a RF
-            model = self._fit_random_forest(X, y)
-            model = model.estimators_
-        elif self.model_type == "gbdt":
-            model = self._fit_gbdt(X, y)
-        elif self.model_type == "lightgbm":
-            model = self._fit_lightgbm(X, y)
-        self.model = model
+        if prefitted_model is None
+            if self.model_type == "forest":
+                model = self._fit_random_forest(X, y)
+            elif self.model_type == "tree":
+                # build a list of decision trees by training a RF
+                model = self._fit_random_forest(X, y)
+                model = model.estimators_
+            elif self.model_type == "gbdt":
+                model = self._fit_gbdt(X, y)
+            elif self.model_type == "lightgbm":
+                model = self._fit_lightgbm(X, y)
+            self.model = model
 
-        if self.verbose:
-            print("{} training complete".format(self.model_type.capitalize()))
+            if self.verbose:
+                print("{} training complete".format(self.model_type.capitalize()))
+        else:
+            self.model = model
+
+            if self.verbose:
+                print('Using a prefitted model.')
 
         # extract rules
         self.rule_ensemble = RuleEnsemble(
