@@ -141,7 +141,7 @@ class RuleCondition:
         return self.__str__()
 
     def __str__(self):
-        feature = self.feature_name or self.feature_index
+        feature = self.feature_name or 'feature_{}'.format(self.feature_index)
 
         if self.na_direction == 'left':
             na_info = ' or %s is null' % feature
@@ -410,6 +410,8 @@ def extract_rules_from_lgbm_tree(tree: dict, feature_names=None):
         else:  # a leaf node
             if len(new_conditions) > 0:
                 new_rule = Rule(new_conditions)
+                # set the support attribute
+                new_rule.support = tree['leaf_count'] / n_total_sample
                 rules.update([new_rule])
             else:
                 pass  # tree only has a root node!
