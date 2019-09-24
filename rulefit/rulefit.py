@@ -141,19 +141,36 @@ class RuleCondition:
         return self.__str__()
 
     def __str__(self):
-        if self.feature_name:
-            feature = self.feature_name
+        feature = self.feature_name or self.feature_index
+
+        if self.na_direction == 'left':
+            na_info = ' or %s is null' % feature
+        elif self.na_direction == 'right':
+            na_info = ' or %s not null' % feature
         else:
-            feature = self.feature_index
-        return "%s %s %s" % (feature, self.operator, self.threshold)
+            na_info = ''
+
+        return "%s %s %s%s" % (feature, self.operator, self.threshold, na_info)
 
     @classmethod
     def from_string(cls, s: str):
         """ Create a RuleCondition from a string, which should match the following syntax:
-            feature_{i} (<=|>|==|!=) threshold
+            feature_{i} (<=|>|==|!=) threshold (or feature_{i} is null| not null)
             Make sure there's no space in threshold
         """
-        feature_idx, operator, threshold, *kwargs = s.split()
+        cond, *na_info = s.split('or')
+
+        if na_info:
+            if 'is null' in na_info[0]:
+                na_direction = 'left'
+            elif 'not null' in na_info[0]:
+                na_direction = 'right'
+            else:
+                na_direction = None
+        else:
+            na_direction = None
+
+        feature_idx, operator, threshold, *kwargs = cond.split()
 
         if operator in ('==', '!='):
             threshold = [float(i.strip()) for i in threshold[1:-1].split(",")]
@@ -168,6 +185,7 @@ class RuleCondition:
         return cls(feature_index=feature_index, 
                     threshold=threshold,
                     operator=operator,
+                    na_direction=na_direction,
                     support=0,
                     feature_name=feature_name)
 
