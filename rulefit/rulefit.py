@@ -964,7 +964,7 @@ class RuleFit(BaseEstimator, TransformerMixin):
             coef = self.coef_[i + n_features]
             output_rules += [
                 (
-                    rule.__str__(),
+                    rule,
                     "rule",
                     coef,
                     rule.support,
