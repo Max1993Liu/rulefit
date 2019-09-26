@@ -210,7 +210,7 @@ class RuleCondition:
                 raise ValueError("{} is not a valid operator".format(self.operator))
 
             if self.na_direction is not None:
-                na_ind = np.isnan(X[:, self.feature_index])
+                na_ind = pd.isnull(X[:, self.feature_index])
                 res[na_ind] = int(self.na_direction == "left")
         return res
 
