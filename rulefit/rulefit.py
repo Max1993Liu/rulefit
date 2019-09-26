@@ -125,7 +125,7 @@ class RuleCondition:
         threshold,
         operator,
         support,
-        na_direction=None,
+        include_na=False,
         feature_name=None,
     ):
         if operator not in ('<=', '>', '==', '!='):
@@ -134,7 +134,7 @@ class RuleCondition:
         self.threshold = threshold
         self.operator = operator
         self.support = support
-        self.na_direction = na_direction
+        self.include_na = include_na
         self.feature_name = feature_name
 
     def __repr__(self):
@@ -143,13 +143,11 @@ class RuleCondition:
     def __str__(self):
         feature = self.feature_name or 'feature_{}'.format(self.feature_index)
 
-        if self.na_direction == 'left':
+        if self.include_na:
             na_info = ' or %s is null' % feature
-        elif self.na_direction == 'right':
-            na_info = ' or %s not null' % feature
         else:
             na_info = ''
-
+        
         return "%s %s %s%s" % (feature, self.operator, self.threshold, na_info)
 
     @classmethod
@@ -160,15 +158,9 @@ class RuleCondition:
         """
         cond, *na_info = s.split('or')
 
-        if na_info:
-            if 'is null' in na_info[0]:
-                na_direction = 'left'
-            elif 'not null' in na_info[0]:
-                na_direction = 'right'
-            else:
-                na_direction = None
-        else:
-            na_direction = None
+        include_na = False
+        if na_info and 'is null' in na_info[0]:
+            include_na = True
 
         feature_idx, operator, threshold, *kwargs = cond.split()
 
@@ -185,7 +177,7 @@ class RuleCondition:
         return cls(feature_index=feature_index, 
                     threshold=threshold,
                     operator=operator,
-                    na_direction=na_direction,
+                    include_na=include_na,
                     support=0,
                     feature_name=feature_name)
 
@@ -209,9 +201,9 @@ class RuleCondition:
             else:
                 raise ValueError("{} is not a valid operator".format(self.operator))
 
-            if self.na_direction is not None:
+            if self.include_na:
                 na_ind = pd.isnull(X[:, self.feature_index])
-                res[na_ind] = int(self.na_direction == "left")
+                res[na_ind] = 1
         return res
 
     def __eq__(self, other):
@@ -235,7 +227,6 @@ class Rule:
 
     Warning: this class should not be used directly.
     """
-
     def __init__(self, rule_conditions):
         self.conditions = set(rule_conditions)
         self.support = min([x.support for x in rule_conditions])
@@ -385,7 +376,7 @@ def extract_rules_from_lgbm_tree(tree: dict, feature_names=None):
             else:
                 threshold = float(threshold)
             n_sample = tree["internal_count"]
-            na_direction = "left" if tree["default_left"] else "right"
+            # na_direction = "left" if tree["default_left"] else "right"
 
             traverse_nodes(
                 tree=tree["left_child"],
@@ -393,7 +384,7 @@ def extract_rules_from_lgbm_tree(tree: dict, feature_names=None):
                 threshold=threshold,
                 feature=feature,
                 n_sample=n_sample,
-                na_direction=na_direction,
+                include_na=tree["default_left"],
                 conditions=new_conditions,
             )
 
@@ -403,7 +394,7 @@ def extract_rules_from_lgbm_tree(tree: dict, feature_names=None):
                 threshold=threshold,
                 feature=feature,
                 n_sample=n_sample,
-                na_direction=na_direction,
+                include_na=(not tree['default_left']),
                 conditions=new_conditions,
             )
 
