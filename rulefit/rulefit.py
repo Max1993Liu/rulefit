@@ -345,7 +345,7 @@ def extract_rules_from_lgbm_tree(tree: dict, feature_names=None):
         threshold=None,
         feature=None,
         n_sample=None,
-        na_direction="left",
+        include_na=False,
         conditions=[],
     ):
         if tree.get("split_index", None) == 0:
@@ -361,7 +361,7 @@ def extract_rules_from_lgbm_tree(tree: dict, feature_names=None):
                 threshold=threshold,
                 operator=operator,
                 support=n_sample / n_total_sample,
-                na_direction=na_direction,
+                include_na=include_na,
                 feature_name=feature_name,
             )
             new_conditions = conditions + [rule_condition]
