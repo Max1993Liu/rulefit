@@ -799,6 +799,9 @@ class RuleFit(BaseEstimator, TransformerMixin):
         else:
             self.feature_names = feature_names
 
+        # store the stdev of each feature for calculating the importance later on
+        self.feature_stdev = np.std(X.astype('float'), axis=0)
+
         # build trees
         if prefitted_model is None:
             if self.model_type == "forest":
@@ -958,17 +961,27 @@ class RuleFit(BaseEstimator, TransformerMixin):
                the coefficients and 'support' the support of the rule in the training
                data set (X)
         """
-
         n_features = len(self.coef_) - len(self.rule_ensemble.rules)
         rule_ensemble = list(self.rule_ensemble.rules)
         output_rules = []
+
         ## Add coefficients for linear effects
+        feature_stdev = self.feature_stdev
         for i in range(0, n_features):
             if self.lin_standardise:
                 coef = self.coef_[i] * self.friedscale.scale_multipliers[i]
             else:
                 coef = self.coef_[i]
-            output_rules += [(self.feature_names[i], "linear", coef, 1, None)]
+            output_rules += [
+                (
+                    self.feature_names[i], 
+                    "linear", 
+                    coef, 
+                    1, 
+                    abs(coef) * feature_stdev[i]
+                    )
+                ]
+
         ## Add rules
         for i in range(0, len(self.rule_ensemble.rules)):
             rule = rule_ensemble[i]
