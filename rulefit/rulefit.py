@@ -12,6 +12,9 @@ The module structure is the following:
 """
 import pandas as pd
 import numpy as np
+from io import StringIO
+import json
+import re
 import warnings
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.ensemble import (
@@ -23,6 +26,7 @@ from sklearn.ensemble import (
 from sklearn.linear_model import LassoCV, LogisticRegressionCV
 from sklearn.linear_model import Lasso, LogisticRegression
 from functools import reduce
+from typing import List, Tuple
 
 
 __all__ = ["RuleFit"]
@@ -128,7 +132,7 @@ class RuleCondition:
         include_na=False,
         feature_name=None,
     ):
-        if operator not in ('<=', '>', '==', '!='):
+        if operator not in ('<', '>=', '<=', '>', '==', '!='):
             raise ValueError('Operator {} is not supported.'.format(operator))
         self.feature_index = feature_index
         self.threshold = threshold
@@ -274,7 +278,12 @@ class Rule:
         return self.__hash__() == other.__hash__()
 
 
-_OPERATORS = {"<=": ">", ">": "<=", "!=": "==", "==": "!="}
+_OPERATORS = {"<=": ">", 
+              ">": "<=", 
+              "!=": "==", 
+              "==": "!=",
+              "<": ">=",
+              ">=": "<"}
 
 
 def get_opposite_operator(op):
@@ -326,6 +335,57 @@ def extract_rules_from_scikit_tree(tree, feature_names=None):
             return None
 
     traverse_nodes()
+    return rules
+
+
+def extract_rules_from_xgb_tree(tree: dict, feature_names: List[str]):
+    """ Extract a set of Rule from a single tree of xgb booster
+        Note that support calculation is not supported for xgb, since the 
+        parsed tree object doesn't contain number of samples 
+    """
+    rules = set()
+
+    cache = [(tree, [])]  # a list of (node, rule conditions)
+    while cache:
+        node, conditions = cache.pop()
+
+        if 'leaf' in node:
+            # reaching a leaf node
+            rules.add(Rule(conditions))
+        else:
+            feature_name = node['split']
+            # when feature name is in the form of f1
+            # 1 is the feature index, note in xgb the index starts from 1
+            if re.findall(r'^f[0-9]+', feature_name):
+                feature_index = int(feature_name[1:]) - 1
+                feature_name = feature_names[feature_index]
+            else:
+                feature_index = feature_names.index(feature_name)
+
+            threshold = node['split_condition']
+            left_node_id, right_node_id = node['yes'], node['no']
+            missing_node_id = node['missing']
+
+            for child in node['children']:
+                if child['nodeid'] == left_node_id:
+                    rule_condition = RuleCondition(
+                        feature_index=feature_index,
+                        threshold=threshold,
+                        operator='<',
+                        support=0,
+                        include_na=(child['nodeid']==missing_node_id),
+                        feature_name=feature_name,
+                        ) 
+                else:
+                    rule_condition = RuleCondition(
+                        feature_index=feature_index,
+                        threshold=threshold,
+                        operator='>=',
+                        support=0,
+                        include_na=(child['nodeid']==missing_node_id),
+                        feature_name=feature_name,
+                        )
+                cache.append((child, conditions+[rule_condition])) 
     return rules
 
 
@@ -432,15 +492,19 @@ class RuleEnsemble:
     """
 
     def __init__(self, model, model_type="lightgbm", feature_names=None):
-        if model_type not in ("tree", "forest", "gbdt", "lightgbm"):
+        if model_type.lower() not in ("tree", "forest", "gbdt", "xgb", "xgboost", "lightgbm"):
             raise ValueError(
                 "Only supported model types are: {}".format(
-                    ["tree", "forest", "gbdt", "lightgbm"]
+                    ["tree", "forest", "gbdt", "xgb", "lightgbm"]
                 )
             )
 
+        if model_type.lower() in ("xgb", "xgboost") and feature_names is None:
+            raise ValueError('`feature_names` must be provided when parsing xgb model. '
+                            'Which should be in the same order as in fit process.')
+
         self.model = model
-        self.model_type = model_type
+        self.model_type = model_type.lower()
         self.feature_names = feature_names
         self.rules = set()
         if self.model is not None:
@@ -473,6 +537,19 @@ class RuleEnsemble:
                 model = self.model.booster_
                 for tree in model.dump_model()["tree_info"]:
                     rules = extract_rules_from_lgbm_tree(
+                        tree, feature_names=self.feature_names
+                    )
+                    self.rules.update(rules)
+
+        elif self.model_type in ('xgb', 'xgboost'):
+            if hasattr(self.model, 'get_booster'):
+                model = self.model.get_booster()
+                with StringIO() as s:
+                    model.dump_model(s, dump_format='json')
+                    trees = json.loads(s.getvalue())
+
+                for tree in trees:
+                    rules = extract_rules_from_xgb_tree(
                         tree, feature_names=self.feature_names
                     )
                     self.rules.update(rules)
@@ -526,7 +603,7 @@ class RuleEnsemble:
             return res_
 
     def __str__(self):
-        return (map(lambda x: x.__str__(), self.rules)).__str__()
+        return '\n'.join(map(lambda x: x.__str__(), self.rules))
 
 
 class RuleFit(BaseEstimator, TransformerMixin):
@@ -536,7 +613,9 @@ class RuleFit(BaseEstimator, TransformerMixin):
     Parameters
     ----------
         tree_size:      Number of terminal nodes in generated trees. If exp_rand_tree_size=True, 
-                        this will be the mean number of terminal nodes.
+                        this will be the mean number of terminal nodes. 
+                        Note that for xgb models, `max_depth` is set based on tree_size in the form of
+                        2 ** `max_depth` <= `tree_size`
         sample_fract:   fraction of randomly chosen training observations used to produce each tree. 
                         FP 2004 (Sec. 2)
         max_rules:      approximate total number of rules generated for fitting. Note that actual
@@ -551,6 +630,7 @@ class RuleFit(BaseEstimator, TransformerMixin):
         exp_rand_tree_size: If True, each boosted tree will have a different maximum number of 
                         terminal nodes based on an exponential distribution about tree_size. 
                         (Friedman Sec 3.3)
+        fit_lr:         Boolean: Whether to fit a Logistic Regression model on the transformed dataset
         model_type:     'r': rules only; 'l': linear terms only; 'rl': both rules and linear terms
         random_state:   Integer to initialise random objects and provide repeatability.
         tree_generator: Optional: this object will be used as provided to generate the rules. 
@@ -569,7 +649,7 @@ class RuleFit(BaseEstimator, TransformerMixin):
 
     def __init__(
         self,
-        tree_size=4,
+        tree_size=8,
         categorical_cols=None,
         sample_fract=1,
         max_rules=2000,
@@ -579,15 +659,16 @@ class RuleFit(BaseEstimator, TransformerMixin):
         lin_trim_quantile=0.025,
         lin_standardise=True,
         exp_rand_tree_size=True,
+        fit_lr=True,
         include_linear_features=True,
         fit_with_cv=False,
         Cs=None,
         cv=3,
-        verbose=1,
+        verbose=0,
         n_jobs=1,
         random_state=1024,
     ):
-        if model_type not in ("tree", "forest", "gbdt", "lightgbm"):
+        if model_type not in ("tree", "forest", "gbdt", "xgb", "xgboost", "lightgbm"):
             raise ValueError(
                 "Supported model types are: {}.".format(["tree", "forest", "lightgbm"])
             )
@@ -613,12 +694,22 @@ class RuleFit(BaseEstimator, TransformerMixin):
         self.friedscale = FriedScale(trim_quantile=lin_trim_quantile)
         self.exp_rand_tree_size = exp_rand_tree_size
         self.include_linear_features = include_linear_features
+        self.fit_lr = fit_lr
         self.fit_with_cv = fit_with_cv
         self.cv = cv
         self.Cs = Cs
         self.verbose = verbose
         self.n_jobs = n_jobs
         self.random_state = random_state
+
+    @staticmethod
+    def find_max_depth(tree_size):
+        """ Find the maximum depth for XGB models given maximum number of tree nodes """
+        i = 1
+        while 1:
+            if 2 << i > tree_size:
+                return i
+            i += 1
 
     def _fit_scikit_estimator_with_warm_start(self, X, y, clf):
         """ Used to train RF and GBDT """
@@ -723,6 +814,33 @@ class RuleFit(BaseEstimator, TransformerMixin):
 
         return self._fit_scikit_estimator_with_warm_start(X, y, clf)
 
+    def _fit_xgb(self, X, y):
+        from xgboost import XGBClassifier, XGBRegressor
+
+        N = X.shape[0]
+        n_estimators = self.max_rules // self.tree_size
+        sample_fract = self.sample_fract or min(0.8, (100 + 6 * np.sqrt(N)) / N)        
+        max_depth = self.find_max_depth(self.tree_size)
+
+        if self.mode == 'classification':
+            model = XGBClassifier(
+                max_depth=max_depth,
+                n_estimators=n_estimators,
+                learning_rate=self.learning_rate,
+                subsample=sample_fract,
+                random_state=self.random_state
+                )
+        else:
+            model = XGBRegressor(
+                max_depth=max_depth,
+                n_estimators=n_estimators,
+                learning_rate=self.learning_rate,
+                subsample=sample_fract,
+                random_state=self.random_state
+                )
+        model.fit(X, y)
+        return model
+
     def _fit_lightgbm(self, X, y):
         from lightgbm import LGBMClassifier, LGBMRegressor
 
@@ -731,12 +849,13 @@ class RuleFit(BaseEstimator, TransformerMixin):
         sample_fract = self.sample_fract or min(0.8, (100 + 6 * np.sqrt(N)) / N)
 
         if self.mode == "classification":
-            model = LGBMClassifier(
+            model = LGBMClassifier(    
                 num_leaves=self.tree_size,
                 learning_rate=self.learning_rate,
                 subsample=sample_fract,
                 n_estimators=n_estimators,
                 zero_as_missing=False,
+                random_state=self.random_state
             )
         else:
             model = LGBMRegressor(
@@ -745,6 +864,7 @@ class RuleFit(BaseEstimator, TransformerMixin):
                 subsample=sample_fract,
                 n_estimators=n_estimators,
                 zero_as_missing=False,
+                random_state=self.random_state
             )
         model.fit(
             X,
@@ -791,13 +911,12 @@ class RuleFit(BaseEstimator, TransformerMixin):
 
         if hasattr(X, "columns"):
             # X is a DataFrame
-            feature_names = X.columns.tolist()
+            self.feature_names = feature_names = X.columns.tolist()
             X = X.copy().values
 
         if feature_names is None:
-            self.feature_names = ["feature_" + str(x) for x in range(0, X.shape[1])]
-        else:
-            self.feature_names = feature_names
+            self.feature_names = feature_names = ["feature_" + str(x) for x in range(0, X.shape[1])]
+            
 
         # store the stdev of each feature for calculating the importance later on
         self.feature_stdev = np.std(X.astype('float'), axis=0)
@@ -814,6 +933,8 @@ class RuleFit(BaseEstimator, TransformerMixin):
                 model = self._fit_gbdt(X, y)
             elif self.model_type == "lightgbm":
                 model = self._fit_lightgbm(X, y)
+            elif self.model_type in ("xgb", "xgboost"):
+                model = self._fit_xgb(X, y)
             self.model = model
 
             if self.verbose:
@@ -842,77 +963,82 @@ class RuleFit(BaseEstimator, TransformerMixin):
             for f in self.rule_filter:
                 self.rule_ensemble.filter_rules(f)
 
-        # concatenate original features and rules
-        X_rules = self.rule_ensemble.transform(X)
+        ########################################
+        ## Fit a LR on the transformer dataset #
+        ########################################
 
-        if self.verbose:
-            print("{} rules were applied".format(len(self.rule_ensemble)))
+        if self.fit_lr:
+            # concatenate original features and rules
+            X_rules = self.rule_ensemble.transform(X)
 
-        # standardise linear variables
-        if self.include_linear_features:
-            if self.lin_standardise:
-                self.friedscale.train(X)
-                X_regn = self.friedscale.scale(X)
-            else:
-                X_regn = X.copy()
+            if self.verbose:
+                print("{} rules were applied".format(len(self.rule_ensemble)))
 
-        # prepare training data, rule features are appended to the right
-        if self.include_linear_features:
-            X_concat = np.concatenate((X_regn, X_rules), axis=1)
-        else:
-            X_concat = X_rules
-
-        if self.verbose:
-            print("Start LR training.")
-
-        # fit Lasso
-        if self.mode == "regression":
-            if self.fit_with_cv:
-                if self.Cs is None:
-                    # use defaultshasattr(self.Cs, "__len__"):
-                    n_alphas = 100
-                    alphas = None
-                elif hasattr(self.Cs, "__len__"):
-                    n_alphas = None
-                    alphas = 1.0 / self.Cs
+            # standardise linear variables
+            if self.include_linear_features:
+                if self.lin_standardise:
+                    self.friedscale.train(X)
+                    X_regn = self.friedscale.scale(X)
                 else:
-                    n_alphas = self.Cs
-                    alphas = None
-                self.lscv = LassoCV(
-                    n_alphas=n_alphas,
-                    alphas=alphas,
-                    cv=self.cv,
-                    verbose=self.verbose,
-                    random_state=self.random_state,
-                    n_jobs=self.n_jobs,
-                )
+                    X_regn = X.copy()
+
+            # prepare training data, rule features are appended to the right
+            if self.include_linear_features:
+                X_concat = np.concatenate((X_regn, X_rules), axis=1)
             else:
-                self.lscv = Lasso(verbose=self.verbose, random_state=self.random_state)
-            self.lscv.fit(X_concat, y)
-            self.coef_ = self.lscv.coef_
-            self.intercept_ = self.lscv.intercept_
-        else:
-            if self.fit_with_cv:
-                Cs = 10 if self.Cs is None else self.Cs
-                self.lscv = LogisticRegressionCV(
-                    Cs=Cs,
-                    cv=self.cv,
-                    penalty="l1",
-                    verbose=self.verbose,
-                    random_state=self.random_state,
-                    solver="liblinear",
-                    n_jobs=self.n_jobs,
-                )
+                X_concat = X_rules
+
+            if self.verbose:
+                print("Start LR training.")
+
+            # fit Lasso
+            if self.mode == "regression":
+                if self.fit_with_cv:
+                    if self.Cs is None:
+                        # use defaultshasattr(self.Cs, "__len__"):
+                        n_alphas = 100
+                        alphas = None
+                    elif hasattr(self.Cs, "__len__"):
+                        n_alphas = None
+                        alphas = 1.0 / self.Cs
+                    else:
+                        n_alphas = self.Cs
+                        alphas = None
+                    self.lscv = LassoCV(
+                        n_alphas=n_alphas,
+                        alphas=alphas,
+                        cv=self.cv,
+                        verbose=self.verbose,
+                        random_state=self.random_state,
+                        n_jobs=self.n_jobs,
+                    )
+                else:
+                    self.lscv = Lasso(verbose=self.verbose, random_state=self.random_state)
+                self.lscv.fit(X_concat, y)
+                self.coef_ = self.lscv.coef_
+                self.intercept_ = self.lscv.intercept_
             else:
-                self.lscv = LogisticRegression(
-                    penalty="l1",
-                    random_state=self.random_state,
-                    verbose=self.verbose,
-                    solver="liblinear",
-                )
-            self.lscv.fit(X_concat, y)
-            self.coef_ = self.lscv.coef_[0]
-            self.intercept_ = self.lscv.intercept_[0]
+                if self.fit_with_cv:
+                    Cs = 10 if self.Cs is None else self.Cs
+                    self.lscv = LogisticRegressionCV(
+                        Cs=Cs,
+                        cv=self.cv,
+                        penalty="l1",
+                        verbose=self.verbose,
+                        random_state=self.random_state,
+                        solver="liblinear",
+                        n_jobs=self.n_jobs,
+                    )
+                else:
+                    self.lscv = LogisticRegression(
+                        penalty="l1",
+                        random_state=self.random_state,
+                        verbose=self.verbose,
+                        solver="liblinear",
+                    )
+                self.lscv.fit(X_concat, y)
+                self.coef_ = self.lscv.coef_[0]
+                self.intercept_ = self.lscv.intercept_[0]
         return self
 
     def predict(self, X):
