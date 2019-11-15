@@ -768,7 +768,7 @@ class RuleFit(BaseEstimator, TransformerMixin):
             clf = RandomForestClassifier(
                 n_estimators=n_estimators,
                 max_leaf_nodes=self.tree_size,
-                subsample=sample_fract,
+                max_features=sample_fract,
                 max_depth=100,
                 random_state=self.random_state,
             )
@@ -870,7 +870,7 @@ class RuleFit(BaseEstimator, TransformerMixin):
             X,
             y,
             feature_name=self.feature_names,
-            categorical_feature=self.categorical_cols,
+            categorical_feature=self.categorical_cols or 'auto',
         )
         return model
 
