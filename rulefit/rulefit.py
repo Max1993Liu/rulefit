@@ -790,7 +790,7 @@ class RuleFit(BaseEstimator, TransformerMixin):
         )
 
         N = X.shape[0]
-        n_estimators = self.max_rules // self.tree_size
+        n_estimators = max(1, self.max_rules // self.tree_size)
         sample_fract = self.sample_fract or min(0.8, (100 + 6 * np.sqrt(N)) / N)
 
         if self.mode == "classification":
@@ -818,7 +818,7 @@ class RuleFit(BaseEstimator, TransformerMixin):
         from xgboost import XGBClassifier, XGBRegressor
 
         N = X.shape[0]
-        n_estimators = self.max_rules // self.tree_size
+        n_estimators = max(self.max_rules // self.tree_size, 1)
         sample_fract = self.sample_fract or min(0.8, (100 + 6 * np.sqrt(N)) / N)        
         max_depth = self.find_max_depth(self.tree_size)
 
@@ -845,7 +845,7 @@ class RuleFit(BaseEstimator, TransformerMixin):
         from lightgbm import LGBMClassifier, LGBMRegressor
 
         N = X.shape[0]
-        n_estimators = self.max_rules // self.tree_size
+        n_estimators = max(1, self.max_rules // self.tree_size)
         sample_fract = self.sample_fract or min(0.8, (100 + 6 * np.sqrt(N)) / N)
 
         if self.mode == "classification":
